@@ -1,7 +1,164 @@
 # Bulls — Google Sheets Import
 
 Початкове середовище: Laravel 13, PHP 8.4 FPM, Nginx, MySQL 8.4.
-Імпорт Google Sheets і щоденний розклад ще не реалізовані.
+Реалізовано схему конфігурації та read-only клієнт Google Sheets через Service Account.
+Збереження даних із Google Sheets у цільові таблиці та щоденний розклад ще не реалізовані.
+
+## Google Sheets: Service Account
+
+1. Створіть або виберіть проєкт у [Google Cloud Console](https://console.cloud.google.com/).
+2. У **APIs & Services → Library** увімкніть **Google Sheets API**.
+3. У **IAM & Admin → Service Accounts** створіть Service Account. Доступ до
+   конкретних таблиць надається через Google Sheets; права Owner/Editor на
+   Cloud-проєкт цьому акаунту для читання таблиць не потрібні.
+4. Відкрийте акаунт → **Keys → Add key → Create new key → JSON** та збережіть файл.
+5. Покладіть JSON у `src/storage/app/private/google-service-account.json`.
+   Цей каталог уже виключений із Git. Не розміщуйте ключ у `public`.
+6. У кожному Google Sheets-файлі натисніть **Share** і додайте `client_email`
+   із JSON як **Viewer**. Звичайний доступ вашого Google-користувача не надає
+   доступу Service Account автоматично.
+
+Офіційні інструкції: [створення credentials](https://developers.google.com/workspace/guides/create-credentials#service-account),
+[Service Account OAuth](https://developers.google.com/identity/protocols/oauth2/service-account).
+Якщо організація заборонила JSON-ключі або зовнішній sharing, потрібне
+погоджене адміністратором налаштування доступу.
+
+Налаштування у `src/.env` (приклад уже є в `.env.example`):
+
+```dotenv
+GOOGLE_SHEETS_CREDENTIALS=storage/app/private/google-service-account.json
+GOOGLE_SHEETS_TIMEOUT=30
+GOOGLE_SHEETS_CONNECT_TIMEOUT=10
+GOOGLE_SHEETS_MAX_ATTEMPTS=4
+```
+
+Відносний шлях рахується від Laravel-каталогу `src`; абсолютний шлях має бути
+доступним усередині PHP-контейнера. Для читання ключа CLI-користувачем та PHP-FPM:
+
+```bash
+docker compose exec php chgrp www-data storage/app/private/google-service-account.json
+docker compose exec php chmod 640 storage/app/private/google-service-account.json
+docker compose exec --user "$(id -u):$(id -g)" php php artisan config:clear
+```
+
+Ключ має залишатися у власності користувача, під яким виконуються CLI-команди.
+OAuth access token отримується автоматично й кешується в пам’яті поточного
+екземпляра клієнта до оновлення за 60 секунд перед завершенням строку дії.
+Scope: `https://www.googleapis.com/auth/spreadsheets.readonly`.
+Клієнт не читає ключ і не викликає Google під час запуску застосунку.
+
+## Використання GoogleSheetsClient
+
+У Laravel-коді або інтерактивному Tinker:
+
+```php
+use App\Services\GoogleSheets\GoogleSheetsClient;
+
+$client = app(GoogleSheetsClient::class);
+$titles = $client->getSheetTitles('SPREADSHEET_ID');
+
+// Приклад вкладки із заголовками в третьому рядку.
+$headers = $client->getHeaders('SPREADSHEET_ID', 'Sales', 3);
+$rows = $client->getRows('SPREADSHEET_ID', 'Sales', 3);
+
+foreach ($rows as $sourceRow => $values) {
+    // $sourceRow — абсолютний номер рядка, наприклад 4 або 6.
+    // $values — ['product_name' => 'Tea', 'price' => 0, 'amount' => null].
+}
+```
+
+Передавати потрібно лише ID, не повний URL. `SPREADSHEET_ID` — частина URL між `/spreadsheets/d/` та `/edit`, а не `gid`.
+`headerRow` за замовчуванням дорівнює 1. Дані читаються через `values.get`;
+заголовки й рядки для `getRows()` беруться з однієї відповіді. Назви вкладок
+екрануються як A1-діапазони, включно з пробілами й апострофами.
+
+Заголовки нормалізуються: крайові Unicode-пробіли, NBSP, U+200B/U+FEFF
+прибираються; внутрішні пробіли стискаються; регістр знижується через UTF-8.
+`HeaderNormalizer` доступний окремо для майбутнього порівняння mappings.
+Він приймає лише `string`: імпортер повинен пропустити `null` у списку заголовків
+до виклику нормалайзера. Заголовки від `getData()` вже нормалізовані.
+`getHeaders()` повертає нормалізовані назви у вихідному порядку: порожні
+назви стають `null`, дублікати залишаються видимими. `getData()` одним запитом
+повертає `headers`, `ambiguous` (список повторних нормалізованих назв) і `rows`.
+У `rows` є лише однозначні іменовані колонки; порожні, дубльовані та додаткові
+колонки без заголовків ігноруються. Жоден із дублікатів не обирається довільно.
+`getRows()` — скорочений доступ до `getData()['rows']` для перегляду даних;
+він не призначений для імпортера, бо приховує метадані неоднозначності.
+Майбутній імпортер має використовувати `getData()` та відхиляти конкретний target,
+лише якщо потрібна йому нормалізована `source_column` відсутня або є в `ambiguous`.
+Проблеми незмаплених колонок не блокують інші targets.
+
+Короткі рядки доповнюються `null`; наявні порожні комірки `""` зберігаються.
+Порожні рядки пропускаються без перенумерації, `0` та `false` зберігаються.
+Вкладка лише із заголовками повертає порожні `rows`, а повністю порожня вкладка
+або відсутній рядок заголовків — помилку.
+
+Числа й boolean читаються без форматування; дати — як форматовані рядки
+за налаштуваннями аркуша (`UNFORMATTED_VALUE` + `FORMATTED_STRING`).
+Валюта `12.50` повертається як число без символу, а 15% — як `0.15`.
+`decimal_separator` і `thousands_separator` застосовуватимуться лише до текстових
+клітинок; сирі числа не потрібно повторно парсити як локалізований текст.
+Дата залежить від локалі й формату клітинки: `type_options.format` має відповідати
+цьому рядку. Перетворення до `data_type` із mappings належить наступному етапу.
+Зараз весь аркуш і результат зіставлення зберігаються в пам’яті; streaming
+і гарантії обмеженого використання пам’яті немає. Великі вкладки можуть
+перевищити PHP `memory_limit`. Поділ великих файлів на діапазони
+можна додати окремо, зберігши цей контракт.
+
+## Помилки Google API та retry
+
+Клієнт кидає `App\Exceptions\GoogleSheetsException`. `getCode()` містить
+HTTP-статус або 0 для локальних помилок, невалідних відповідей чи мережевих збоїв.
+Ключі, JWT, access tokens та тіла помилкових відповідей не додаються до повідомлень.
+
+| Код | Дія |
+|---|---|
+| 403 `accessNotConfigured` / `SERVICE_DISABLED` | Увімкнути Sheets API у проєкті Service Account; повторів немає |
+| 403, без quota-причини | Перевірити активацію Sheets API та Viewer-доступ для `client_email`; повторів немає |
+| 404 | Перевірити spreadsheet ID, наявність файлу та доступ Service Account; повторів немає |
+| 400 | Перевірити діапазон і тип файлу. Для `.xlsx` у режимі Office виконати File → Save as Google Sheets і використати ID створеної Google-таблиці; повторів немає |
+| 401 | Перевірити Service Account credentials; повторів немає |
+| 429 / quota-403 | Обмежені повтори з exponential backoff і jitter |
+| 500 / 502 / 503 / 504, connection failure | Обмежені повтори; після вичерпання — виняток |
+
+За замовчуванням — **4 спроби загалом** (1 запит + максимум 3 повтори),
+затримки від 1000 ms із подвоєнням, jitter 0–1000 ms, стеля 32000 ms.
+`Retry-After` у секундах або HTTP-date враховується в межах цієї стелі.
+Значення понад 32 секунди за стандартних налаштувань обрізається до 32 секунд,
+а не подовжує очікування понад `max_delay_ms`.
+Ліміти й timeout налаштовуються у `src/config/google-sheets.php`; допустимо
+1–10 спроб, connect timeout не більший за request timeout. OAuth-запити
+використовують той самий транспорт. Редиректи вимкнені.
+Причини 403 визначаються за машинними полями `error.status`, `errors[].reason`
+та `details[].reason`, без пошуку в тексті повідомлення. Загальний HTTP 400
+не доводить, що файл є Excel, тому повідомлення пропонує також перевірити запит.
+Стеля 32 s працює і для `Retry-After`; за 4 стандартних спроб backoff без нього
+становить 1/2/4 s плюс jitter.
+
+Heartbeat належить майбутньому імпортеру: оновлювати між запитами та на кожній
+спробі OAuth/Sheets (перед HTTP-викликом і після очікування retry).
+Не можна оновлювати його лише після завершення всього retry-циклу.
+Поточний read-only клієнт не змінює `sync_runs`.
+
+### Перевірка абсолютних номерів рядків
+
+Діапазон із самою назвою вкладки охоплює весь аркуш; Google документує
+обрізання лише кінцевих порожніх рядків/колонок:
+[ValueRange](https://developers.google.com/workspace/sheets/api/reference/rest/v4/spreadsheets.values),
+[A1 notation](https://developers.google.com/workspace/sheets/api/guides/concepts#cell).
+Тестова відповідь `[[], [], ["Name"], ["Tea"]]` з `headerRow=3` дає `source_row=4`.
+Це перевірка контракту через fake, а не реальна відповідь Google.
+Для live smoke test залишити рядки 1–2 порожніми, записати `Name` в A3 і `Tea`
+в A4, додати незмаплену колонку B (`Notes` у B3, довільний текст у B4)
+та перевірити `getData(ID, TAB, 3)['rows'][4]['name'] === 'Tea'`.
+Також перевірити, що додаткова колонка повернулася як `notes`, а імпортер
+надалі зможе її ігнорувати через mappings. Цю live-перевірку потрібно виконати
+до Stage 3. Вона потребує JSON-ключа, ID таблиці та спільного доступу й поки не виконана.
+Джерело: [Google Sheets usage limits](https://developers.google.com/workspace/sheets/api/limits).
+
+Тести інтеграції використовують згенерований тестовий RSA-ключ, HTTP-fakes
+і підміну очікування; справжні ключі та мережеві запити для них не потрібні.
+Перевірка конкретного живого Google-файлу потребує налаштованого ключа та sharing.
 
 ## Схема конфігурації
 
