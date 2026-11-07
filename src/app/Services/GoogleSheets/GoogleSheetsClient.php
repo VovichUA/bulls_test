@@ -60,10 +60,10 @@ class GoogleSheetsClient
      *
      * @return array{headers: list<string|null>, ambiguous: list<string>, rows: array<int, array<array-key, string|int|float|bool|null>>}
      */
-    public function getData(string $spreadsheetId, string $tab, int $headerRow = 1): array
+    public function getData(string $spreadsheetId, string $tab, int $headerRow = 1, ?callable $heartbeat = null): array
     {
         $this->validate($spreadsheetId, $tab, $headerRow);
-        $values = $this->values($spreadsheetId, $this->quotedTab($tab));
+        $values = $this->values($spreadsheetId, $this->quotedTab($tab), $heartbeat);
         $rows = $this->mapper->rows($values, $headerRow);
         $headers = $this->mapper->headers($values[$headerRow - 1]);
 
@@ -71,11 +71,11 @@ class GoogleSheetsClient
     }
 
     /** @return list<list<mixed>> */
-    private function values(string $spreadsheetId, string $range): array
+    private function values(string $spreadsheetId, string $range, ?callable $heartbeat = null): array
     {
         $data = $this->request(rawurlencode($spreadsheetId).'/values/'.rawurlencode($range), [
             'majorDimension' => 'ROWS', 'valueRenderOption' => 'UNFORMATTED_VALUE', 'dateTimeRenderOption' => 'FORMATTED_STRING',
-        ]);
+        ], $heartbeat);
         if (! is_string($data['range'] ?? null) || ! is_array($data['values'] ?? []) || ! array_is_list($data['values'] ?? [])) {
             throw new GoogleSheetsException('Google Sheets returned an invalid values response.');
         }
@@ -92,12 +92,12 @@ class GoogleSheetsClient
     /** @param array<string, string> $query
      * @return array<string, mixed>
      */
-    private function request(string $path, array $query): array
+    private function request(string $path, array $query, ?callable $heartbeat = null): array
     {
         $data = $this->http->send('GET', self::API_URL.$path, [
-            'headers' => ['Authorization' => 'Bearer '.$this->tokens->getAccessToken()],
+            'headers' => ['Authorization' => 'Bearer '.$this->tokens->getAccessToken($heartbeat)],
             'query' => $query,
-        ])->json();
+        ], $heartbeat)->json();
         if (! is_array($data) || array_is_list($data)) {
             throw new GoogleSheetsException('Google Sheets returned an invalid JSON response.');
         }

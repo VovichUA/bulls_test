@@ -2,6 +2,7 @@
 
 namespace Tests\Feature\GoogleSheets;
 
+use App\Exceptions\GoogleSheetsApiException;
 use App\Exceptions\GoogleSheetsException;
 use App\Services\GoogleSheets\GoogleSheetsClient;
 use Illuminate\Http\Client\Request;
@@ -115,6 +116,8 @@ class GoogleSheetsClientTest extends TestCase
             $this->fail('Expected a permanent Google API error.');
         } catch (GoogleSheetsException $exception) {
             $this->assertSame($status, $exception->getCode());
+            $this->assertInstanceOf(GoogleSheetsApiException::class, $exception);
+            $this->assertFalse($exception->retryable);
             $this->assertStringNotContainsString('SENSITIVE', $exception->getMessage());
         }
         $this->assertSame(1, $this->apiRequestCount());
@@ -333,6 +336,40 @@ class GoogleSheetsClientTest extends TestCase
         } finally {
             Http::assertNothingSent();
         }
+    }
+
+    public function test_heartbeat_runs_on_each_oauth_and_sheets_attempt_without_leaking_to_next_call(): void
+    {
+        Http::fake([
+            self::TOKEN_URL => Http::sequence()->push([], 503)->push($this->token()),
+            self::API_URL.'*' => Http::sequence()->push([], 429)
+                ->push(['range' => 'Sales!A1:A2', 'values' => [['Name'], ['Tea']]])
+                ->push(['range' => 'Sales!A1:A2', 'values' => [['Name'], ['Tea']]]),
+        ]);
+        $beats = 0;
+        $client = $this->client();
+        $data = $client->getData('id', 'Sales', 1, function () use (&$beats): void {
+            $beats++;
+        });
+        $this->assertSame([2 => ['name' => 'Tea']], $data['rows']);
+        $this->assertSame(6, $beats);
+        $client->getData('id', 'Sales');
+        $this->assertSame(6, $beats);
+    }
+
+    public function test_heartbeat_failure_during_oauth_is_not_a_cacheable_http_error(): void
+    {
+        Http::fake();
+        try {
+            $this->client()->getData('id', 'Sales', 1, function (): never {
+                throw new \RuntimeException('PRIVATE HEARTBEAT FAILURE');
+            });
+            $this->fail('Heartbeat failure should abort authentication.');
+        } catch (GoogleSheetsException $exception) {
+            $this->assertNotInstanceOf(GoogleSheetsApiException::class, $exception);
+            $this->assertStringNotContainsString('PRIVATE', $exception->getMessage());
+        }
+        Http::assertNothingSent();
     }
 
     private function client(): GoogleSheetsClient

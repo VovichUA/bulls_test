@@ -2,6 +2,7 @@
 
 namespace App\Services\GoogleSheets;
 
+use App\Exceptions\GoogleSheetsApiException;
 use App\Exceptions\GoogleSheetsException;
 use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Http\Client\Response;
@@ -26,9 +27,12 @@ class GoogleApiHttpClient
     }
 
     /** @param array<string, mixed> $options */
-    public function send(string $method, string $url, array $options = []): Response
+    public function send(string $method, string $url, array $options = [], ?callable $heartbeat = null): Response
     {
         for ($attempt = 1; $attempt <= $this->maxAttempts; $attempt++) {
+            if ($heartbeat !== null) {
+                $heartbeat();
+            }
             $response = null;
             try {
                 $response = Http::acceptJson()
@@ -49,6 +53,9 @@ class GoogleApiHttpClient
                 }
             }
             Sleep::usleep($this->delayMs($attempt, $response) * 1000);
+            if ($heartbeat !== null) {
+                $heartbeat();
+            }
         }
         throw new GoogleSheetsException('Google API request could not be completed.');
     }
@@ -113,6 +120,6 @@ class GoogleApiHttpClient
             default => 'Google API rejected the request (HTTP '.$status.').',
         };
 
-        return new GoogleSheetsException($message, $status);
+        return new GoogleSheetsApiException($message, $status, $this->retryable($response));
     }
 }

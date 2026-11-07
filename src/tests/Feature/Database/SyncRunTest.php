@@ -45,6 +45,15 @@ class SyncRunTest extends DatabaseTestCase
         $this->assertInstanceOf(CarbonImmutable::class, $second->finished_at);
     }
 
+    public function test_snapshot_ui_counters_are_computed_without_redundant_storage(): void
+    {
+        $run = SyncRun::factory()->create(['rows_processed' => 7])->fresh();
+        $this->assertSame(7, $run->rows_inserted);
+        $this->assertSame(0, $run->rows_updated);
+        $this->assertSame(7, $run->toArray()['rows_inserted']);
+        $this->assertSame(0, $run->toArray()['rows_updated']);
+    }
+
     public function test_target_with_any_run_cannot_be_deleted(): void
     {
         $mapping = ColumnMapping::factory()->create();

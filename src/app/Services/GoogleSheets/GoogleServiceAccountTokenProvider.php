@@ -19,7 +19,7 @@ class GoogleServiceAccountTokenProvider
         private readonly ?string $credentialsPath,
     ) {}
 
-    public function getAccessToken(): string
+    public function getAccessToken(?callable $heartbeat = null): string
     {
         if ($this->accessToken !== null && $this->expiresAt > now()->timestamp + 60) {
             return $this->accessToken;
@@ -28,11 +28,11 @@ class GoogleServiceAccountTokenProvider
         $credentials = $this->credentials();
         try {
             $account = new ServiceAccountCredentials('https://www.googleapis.com/auth/spreadsheets.readonly', $credentials);
-            $token = $account->fetchAuthToken(function (RequestInterface $request): ResponseInterface {
+            $token = $account->fetchAuthToken(function (RequestInterface $request) use ($heartbeat): ResponseInterface {
                 return $this->http->send($request->getMethod(), (string) $request->getUri(), [
                     'headers' => $request->getHeaders(),
                     'body' => (string) $request->getBody(),
-                ])->toPsrResponse();
+                ], $heartbeat)->toPsrResponse();
             });
         } catch (GoogleSheetsException $exception) {
             throw $exception;
