@@ -7,6 +7,7 @@ use PHPUnit\Framework\Attributes\DataProvider;
 use RuntimeException;
 use Tests\DatabaseTestCase;
 use Tests\Support\DatabaseRefreshProbe;
+use Tests\Support\DdlDatabaseRefreshProbe;
 use Tests\TestCase;
 
 class TestingDatabaseSafetyTest extends TestCase
@@ -51,6 +52,15 @@ class TestingDatabaseSafetyTest extends TestCase
         $this->expectExceptionMessage('Only mysql / bulls_testing');
 
         (new DatabaseRefreshProbe('probe'))->check($this->app);
+    }
+
+    public function test_ddl_migrations_reject_development_database_before_migrations(): void
+    {
+        config(['database.connections.mysql.database' => 'bulls']);
+        DB::purge('mysql');
+        $this->expectException(RuntimeException::class);
+        $this->expectExceptionMessage('Only mysql / bulls_testing');
+        (new DdlDatabaseRefreshProbe('probe'))->check($this->app);
     }
 
     public function test_refresh_rejects_database_url_before_migrations(): void
