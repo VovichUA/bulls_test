@@ -38,10 +38,7 @@ class SchemaManager
             throw new SchemaManagerException('A persisted sync target is required.');
         }
         $table = $target->target_table;
-        $this->validateIdentifier($table);
-        if (in_array($table, self::PROTECTED_TABLES, true) || preg_match('/^(sheet_|sync_|column_mapping)/', $table)) {
-            throw new SchemaManagerException('The target table is reserved for the application.');
-        }
+        $this->validateTableName($table);
         $definitions = $this->definitions($target);
         $connection = $this->pinnedConnection($connection);
         $lock = 'sheets_schema:'.sha1($connection->getDatabaseName()."\0".$table);
@@ -113,6 +110,22 @@ class SchemaManager
         return $pinned;
     }
 
+    public function validateTableName(string $name): void
+    {
+        $this->validateIdentifier($name);
+        if (in_array($name, self::PROTECTED_TABLES, true) || preg_match('/^(sheet_|sync_|column_mapping)/', $name)) {
+            throw new SchemaManagerException('The target table is reserved for the application.');
+        }
+    }
+
+    public function validateColumnName(string $name): void
+    {
+        $this->validateIdentifier($name);
+        if (in_array($name, self::SERVICE_COLUMNS, true)) {
+            throw new SchemaManagerException('A mapping cannot overwrite a snapshot service column.');
+        }
+    }
+
     private function validateIdentifier(string $name): void
     {
         if (! preg_match('/^[a-z][a-z0-9_]{0,63}$/D', $name)) {
@@ -130,10 +143,7 @@ class SchemaManager
         $definitions = [];
         foreach ($mappings as $mapping) {
             $name = $mapping->target_column;
-            $this->validateIdentifier($name);
-            if (in_array($name, self::SERVICE_COLUMNS, true)) {
-                throw new SchemaManagerException('A mapping cannot overwrite a snapshot service column.');
-            }
+            $this->validateColumnName($name);
             $type = ColumnDataType::tryFrom($mapping->getRawOriginal('data_type'));
             if ($type === null) {
                 throw new SchemaManagerException('Unsupported mapping data type.');

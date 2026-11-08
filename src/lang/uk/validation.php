@@ -1,0 +1,26 @@
+<?php
+
+return [
+    'required' => 'Поле «:attribute» обов’язкове.',
+    'string' => 'Поле «:attribute» має бути текстом.',
+    'email' => 'Укажіть коректний email.',
+    'lowercase' => 'Поле «:attribute» має містити літери в нижньому регістрі.',
+    'unique' => 'Таке значення поля «:attribute» вже використовується.',
+    'confirmed' => 'Підтвердження поля «:attribute» не збігається.',
+    'boolean' => 'Поле «:attribute» має бути так/ні.',
+    'integer' => 'Поле «:attribute» має бути цілим числом.',
+    'numeric' => 'Поле «:attribute» має бути числом.',
+    'array' => 'Поле «:attribute» має містити список.',
+    'json' => 'Поле «:attribute» має містити коректний JSON.',
+    'in' => 'Невірне значення поля «:attribute».',
+    'enum' => 'Оберіть допустиме значення поля «:attribute».',
+    'distinct' => 'Поле «:attribute» повторюється.',
+    'regex' => 'Невірний формат поля «:attribute».',
+    'date_format' => 'Дата в полі «:attribute» має відповідати формату :format.',
+    'after_or_equal' => 'Поле «:attribute» має містити дату не раніше :date.',
+    'before_or_equal' => 'Поле «:attribute» має містити дату не пізніше :date.',
+    'exists' => 'Обраний запис для поля «:attribute» не існує.',
+    'min' => ['string' => 'Поле «:attribute» має містити щонайменше :min символів.', 'numeric' => 'Мінімальне значення поля «:attribute»: :min.', 'array' => 'Додайте щонайменше :min запис.'],
+    'max' => ['string' => 'Поле «:attribute» має містити не більше :max символів.', 'numeric' => 'Максимальне значення поля «:attribute»: :max.', 'array' => 'Дозволено не більше :max записів.'],
+    'attributes' => ['name' => 'ім’я / назва', 'email' => 'email', 'password' => 'пароль', 'spreadsheet_id' => 'Google Sheets ID', 'tab_name' => 'назва вкладки', 'header_row' => 'рядок заголовків', 'target_table' => 'цільова таблиця', 'date' => 'дата знімка', 'date_from' => 'початкова дата', 'date_to' => 'кінцева дата', 'mappings.*.source_column' => 'заголовок джерела', 'mappings.*.target_column' => 'колонка БД', 'mappings.*.data_type' => 'тип даних', 'mappings.*.type_options_json' => 'параметри типу'],
+];

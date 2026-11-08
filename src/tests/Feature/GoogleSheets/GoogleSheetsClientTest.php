@@ -222,7 +222,7 @@ class GoogleSheetsClientTest extends TestCase
     {
         config(['google-sheets.credentials_path' => null]);
         $client = $this->client();
-        $this->get('/')->assertOk();
+        $this->get('/login')->assertOk();
         try {
             $client->getSheetTitles('id');
             $this->fail('Expected a credentials configuration error.');

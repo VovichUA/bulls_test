@@ -4,6 +4,32 @@
 @source '../../storage/framework/views/*.php';
 
 @theme {
-    --font-sans: 'Instrument Sans', ui-sans-serif, system-ui, sans-serif, 'Apple Color Emoji', 'Segoe UI Emoji',
+    --font-sans: ui-sans-serif, system-ui, sans-serif, 'Apple Color Emoji', 'Segoe UI Emoji',
         'Segoe UI Symbol', 'Noto Color Emoji';
+}
+
+@plugin '@tailwindcss/forms';
+
+[x-cloak] { display: none !important; }
+
+@layer components {
+    .page { @apply mx-auto max-w-7xl px-4 py-8 sm:px-6 lg:px-8; }
+    .card { @apply rounded-2xl border border-slate-200 bg-white shadow-sm; }
+    .card-body { @apply p-5 sm:p-6; }
+    .btn, .btn-secondary, .btn-danger { @apply inline-flex items-center justify-center gap-2 rounded-lg px-4 py-2.5 text-sm font-semibold transition disabled:cursor-not-allowed disabled:opacity-50; }
+    .btn { @apply bg-emerald-800 text-white hover:bg-emerald-900; }
+    .btn-secondary { @apply border border-slate-200 bg-white text-slate-700 hover:bg-slate-50; }
+    .btn-danger { @apply border border-red-200 bg-white text-red-700 hover:bg-red-50; }
+    .input { @apply mt-1.5 block w-full rounded-lg border-slate-300 bg-white text-sm text-slate-900 shadow-sm focus:border-emerald-700 focus:ring-emerald-700; }
+    .field { @apply block text-sm font-medium text-slate-700; }
+    .hint { @apply mt-1.5 text-xs leading-5 text-slate-500; }
+    .link { @apply font-medium text-emerald-800 hover:text-emerald-950 hover:underline; }
+    .badge { @apply inline-flex items-center rounded-full px-2.5 py-1 text-xs font-medium; }
+    .table-wrap { @apply overflow-x-auto rounded-2xl border border-slate-200 bg-white; }
+    .data-table { @apply w-full text-left text-sm; }
+    .data-table th { @apply whitespace-nowrap border-b border-slate-200 bg-slate-50 px-5 py-3 text-xs font-medium uppercase tracking-wide text-slate-500; }
+    .data-table td { @apply border-b border-slate-100 px-5 py-4 align-top; }
+    .data-table tbody tr:last-child td { @apply border-b-0; }
+    .empty { @apply px-6 py-14 text-center text-sm text-slate-500; }
+    .page-title { @apply text-2xl font-semibold tracking-tight text-slate-900; }
 }

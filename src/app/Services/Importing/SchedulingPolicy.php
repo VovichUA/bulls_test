@@ -18,19 +18,26 @@ class SchedulingPolicy
         $scope = fn () => $connection->table('sync_runs')->useWritePdo()->where('target_id', $target->id)->where('snapshot_date', $date);
         if ($scope()->where('status', 'succeeded')->exists()
             || $scope()->whereIn('status', ['pending', 'running'])->when($ignoreRunId !== null, fn ($query) => $query->where('id', '!=', $ignoreRunId))->exists()
-            || $scope()->where('trigger_type', 'scheduled')->where('status', 'failed')->count() >= 3) {
+        ) {
             return false;
         }
-        $history = fn () => $connection->table('sync_runs')->useWritePdo()->where('target_id', $target->id)->where('config_fingerprint', $this->fingerprints->read($connection, $target->id));
-        $failure = $history()->where('status', 'failed')->whereIn('failure_kind', ['configuration', 'api_permanent'])->orderByDesc('finished_at')->orderByDesc('id')->first();
-        if (! $failure) {
-            return true;
-        }
+        $status = $this->failureStatus($connection, $target->id, $date, $this->fingerprints->read($connection, $target->id));
 
-        return $history()->where('status', 'succeeded')->where(function ($query) use ($failure) {
+        return ! $status['permanent_block'] && $status['scheduled_failures'] < $status['failure_limit'];
+    }
+
+    /** @return array{scheduled_failures: int, failure_limit: int, permanent_block: bool} */
+    public function failureStatus(Connection $connection, int $targetId, string $date, string $fingerprint): array
+    {
+        $failures = $connection->table('sync_runs')->useWritePdo()->where('target_id', $targetId)->where('snapshot_date', $date)->where('trigger_type', 'scheduled')->where('status', 'failed')->count();
+        $history = fn () => $connection->table('sync_runs')->useWritePdo()->where('target_id', $targetId)->where('config_fingerprint', $fingerprint);
+        $failure = $history()->where('status', 'failed')->whereIn('failure_kind', ['configuration', 'api_permanent'])->orderByDesc('finished_at')->orderByDesc('id')->first();
+        $recovered = $failure && $history()->where('status', 'succeeded')->where(function ($query) use ($failure) {
             $query->where('finished_at', '>', $failure->finished_at)->orWhere(function ($query) use ($failure) {
                 $query->where('finished_at', $failure->finished_at)->where('id', '>', $failure->id);
             });
         })->exists();
+
+        return ['scheduled_failures' => $failures, 'failure_limit' => 3, 'permanent_block' => $failure !== null && ! $recovered];
     }
 }

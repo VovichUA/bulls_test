@@ -1,0 +1,6 @@
+<x-app-layout>
+    <x-slot name="header"><p class="mb-1 text-xs uppercase tracking-widest text-slate-400">Конфігурація</p><h1 class="page-title">Вкладки</h1></x-slot>
+    <div class="page"><form method="GET" class="mb-6 flex flex-wrap items-end gap-3"><label class="field" for="tab-source-filter">Файл<select id="tab-source-filter" class="input" name="source"><option value="">Усі файли</option>@foreach($sources as $source)<option value="{{ $source->id }}" @selected(request('source') == $source->id)>{{ $source->name }}</option>@endforeach</select></label><button class="btn-secondary">Застосувати</button></form>
+        <div class="table-wrap"><table class="data-table"><thead><tr><th>Вкладка</th><th>Файл</th><th>Заголовки</th><th>Статус</th><th>Цілей</th></tr></thead><tbody>@forelse($tabs as $tab)<tr><td><a class="link" href="{{ route('sources.tabs.show', [$tab->source, $tab]) }}">{{ $tab->tab_name }}</a></td><td>{{ $tab->source->name }}</td><td>Рядок {{ $tab->header_row }}</td><td><x-status-badge :status="$tab->is_active ? 'active' : 'inactive'" /></td><td>{{ $tab->targets_count }}</td></tr>@empty<tr><td colspan="5" class="empty">Вкладок немає. Відкрийте файл, щоб завантажити їх із Google.</td></tr>@endforelse</tbody></table></div><div class="mt-6">{{ $tabs->links() }}</div>
+    </div>
+</x-app-layout>

@@ -6,6 +6,8 @@ use App\Enums\SyncRunStatus;
 use App\Enums\SyncRunTriggerType;
 use Database\Factories\SyncRunFactory;
 use Illuminate\Database\Eloquent\Attributes\Fillable;
+use Illuminate\Database\Eloquent\Attributes\Scope;
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Casts\Attribute;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
@@ -28,6 +30,12 @@ class SyncRun extends Model
     protected function rowsUpdated(): Attribute
     {
         return Attribute::get(fn (): int => 0);
+    }
+
+    #[Scope]
+    protected function stalePending(Builder $query): void
+    {
+        $query->where('status', 'pending')->whereRaw('COALESCE(heartbeat_at, started_at, created_at) < ?', [now()->subMinutes(config('sheet-import.stale_after_minutes'))->format('Y-m-d H:i:s')]);
     }
 
     public function target(): BelongsTo
