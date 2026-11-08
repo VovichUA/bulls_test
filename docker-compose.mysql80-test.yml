@@ -1,0 +1,29 @@
+# Disposable compatibility tests only. No published ports or production database.
+name: bulls-mysql80-test
+services:
+  mysql:
+    image: mysql:8.0
+    environment:
+      MYSQL_DATABASE: bulls_testing
+      MYSQL_USER: bulls
+      MYSQL_PASSWORD: secret
+      MYSQL_ROOT_PASSWORD: secret
+    command: --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci
+    volumes:
+      - mysql80_testing:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-psecret"]
+      interval: 3s
+      timeout: 5s
+      retries: 40
+  php:
+    image: bulls-php-mysql80-test
+    build:
+      context: ./.docker/php
+    volumes:
+      - ./src:/var/www/html
+    depends_on:
+      mysql:
+        condition: service_healthy
+volumes:
+  mysql80_testing:

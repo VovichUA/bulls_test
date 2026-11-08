@@ -774,7 +774,7 @@ docker compose -f docker-compose.yml -f docker-compose.automation.yml logs worke
 ### Ubuntu: cron та Supervisor
 
 ```cron
-* * * * * cd /var/www/bulls/src && /usr/bin/php artisan schedule:run >> /var/www/bulls/src/storage/logs/scheduler.log 2>&1
+* * * * * bulls /bin/sh -c 'umask 0002; cd /var/www/bulls/src && /usr/bin/flock -n storage/framework/schedule-run.lock /usr/bin/php8.4 artisan schedule:run >> storage/logs/scheduler.log 2>&1'
 ```
 
 Перевірте шляхи й користувача в [Supervisor-конфігу](deploy/supervisor-sheets.conf),
@@ -787,8 +787,8 @@ sudo supervisorctl status bulls-sheets-worker
 ```
 
 Конфіг використовує [обгортку воркера](deploy/queue-worker.sh), `numprocs=1`,
-`stopasgroup=true`, `killasgroup=true`, `stopwaitsecs=660`. Майбутній `setup.sh`
-має встановлювати ту саму межу. Не запускайте Docker worker і Supervisor worker
+`stopasgroup=true`, `killasgroup=true`, `stopwaitsecs=660`. `setup.sh`
+генерує такий самий ліміт з явним `/usr/bin/php8.4`. Не запускайте Docker worker і Supervisor worker
 одночасно для цієї черги. Один воркер не гарантує дотримання квоти сам по собі:
 HTTP retry/backoff залишається потрібним. Redis у цьому варіанті не налаштований.
 
@@ -812,4 +812,129 @@ TERM/KILL заблокованого disposable worker — окрема ручн
 
 ```bash
 docker compose exec --user 1000:1000 php php artisan schedule:list
+```
+
+
+## Ubuntu setup.sh: окрема VM на вашому ноутбуці
+
+Мінімальний [setup.sh](setup.sh) підтримує **Ubuntu 22.04 і 24.04 LTS** зі
+запущеним systemd, на чистій виділеній VM. Не запускайте його на основній ОС
+ноутбука: він встановлює системні служби й керує `/var/www/bulls`, БД `bulls`,
+MySQL-акаунтом `bulls_app` і системним користувачем `bulls`.
+Plain Docker або WSL без systemd не підходять для цієї перевірки.
+
+Скрипт встановлює PHP 8.4 (фактичний lock потребує **>=8.4.1**), PHP-розширення,
+nginx, MySQL 8.0 із Ubuntu, Supervisor/cron, Composer2 і **Node.js 22 >=22.12**.
+PHP отримується з додаткового `ondrej/php` PPA; потрібен доступ до Launchpad.
+Composer installer і офіційний Node-архів перевіряються за checksum через HTTPS.
+Node залишається потрібним для production-збірки Vite; `public/build` не додається
+до Git. Composer/npm/Artisan виконуються як `bulls`, не як root.
+
+Це bootstrap одного checkout і його повторний запуск у простої, **не механізм
+оновлення працюючого сайту**. rsync, maintenance/release-процес і фазові маркери
+відкладено до реальної VM-перевірки. Не запускайте імпорти чи користувацькі запити
+під час повторного setup. Не поєднуйте цю автоматизацію з Docker worker/scheduler.
+
+### Створення тестової VM
+
+На ноутбуці можна використати [Multipass від Canonical](https://canonical.com/multipass/docs/latest/how-to-guides/install-multipass/).
+Команди нижче створюють окрему VM, а не встановлюють стек застосунку на хості:
+
+```bash
+sudo snap install multipass
+multipass launch 24.04 --name bulls-setup --cpus 2 --memory 4G --disk 20G
+multipass info bulls-setup
+```
+
+Для повторення на 22.04 використайте іншу чисту VM та ім’я, наприклад `bulls-setup22`.
+Віртуалізація має бути доступна в BIOS/UEFI; проблеми запуску VM усуваються до setup.
+
+У VM потрібна поточна версія файлів, включно з ще не закоміченим `setup.sh`.
+Можна клонувати вже опублікований репозиторій у `/var/www/bulls`, або передати
+локальні вихідні файли без `.env`, ключів та runtime-даних. З кореня цього проєкту
+на ноутбуці. Environment-файли виключено всі, після чого додається лише публічний `.env.example`:
+
+```bash
+tar --exclude='src/.env*' \
+  --exclude='src/vendor' --exclude='src/node_modules' --exclude='src/storage' \
+  --exclude='src/bootstrap/cache' --exclude='src/public/storage' \
+  --exclude='src/public/build' --exclude='src/public/hot' \
+  --exclude='src/.git' --exclude='src/.codex' --exclude='src/.idea' \
+  -cf /tmp/bulls-ubuntu-source.tar setup.sh deploy src
+tar -rf /tmp/bulls-ubuntu-source.tar src/.env.example
+gzip -f /tmp/bulls-ubuntu-source.tar
+multipass transfer /tmp/bulls-ubuntu-source.tar.gz bulls-setup:/home/ubuntu/
+multipass shell bulls-setup
+```
+
+Далі **всередині VM**:
+
+```bash
+sudo install -d -m 0755 /var/www/bulls
+sudo tar --no-same-owner -xzf /home/ubuntu/bulls-ubuntu-source.tar.gz -C /var/www/bulls
+cd /var/www/bulls
+vm_host=$(hostname -I | awk '{print $1}')
+printf 'Test URL: http://%s/login\n' "$vm_host"
+sudo script -q -e -c "./setup.sh --server-name $vm_host" /root/bulls-setup-run1.log
+```
+
+Скрипт запитає власні email, ім’я та прихований пароль адміністратора
+(щонайменше 12 символів, максимум 72 байти). Не передавайте пароль аргументом команди,
+не вмикайте shell tracing або запис input-потоку термінала. `script` тут записує
+вивід, а не прихований пароль. Після setup `curl "http://$vm_host/up"` у VM має
+повернути 200. Відкрийте в браузері ноутбука URL із `Test URL` вище. Переконайтеся,
+що `vm_host` відповідає IPv4 із `multipass info`; для обох запусків значення має
+бути однаковим. TLS скрипт не видає; HTTPS налаштовується окремо.
+
+Після асинхронного reload nginx перевірка `/up` повторює невдалі запити
+до 5 разів із паузою 1 секунду та обмеженням часу. Успіхом є лише HTTP 200;
+стала помилка зупиняє setup і залишає керовану автоматизацію вимкненою.
+
+Повторний запуск із тим самим server name та admin email:
+
+```bash
+sudo script -q -e -c "./setup.sh --server-name $vm_host" /root/bulls-setup-run2.log
+```
+
+Якщо адміністратор уже створений, пароль можна залишити порожнім: seeder збереже
+наявний hash. APP_KEY і випадковий пароль БД не перегенеровуються. Власні значення
+керованого `.env` зберігаються; чужий `.env`/БД/DB-користувач не приймаються автоматично.
+Перший bootstrap додає службовий коментар у `.env`, наступний розпізнає його.
+Це простий маркер того самого встановлення, не гарантія відновлення після будь-якого збою.
+
+Для noninteractive-запуску доступний `--admin-file /root/bulls-admin.json`.
+Створіть root-owned JSON із режимом 0600 JSON з рядковими ключами `email`, `name`, `password` через
+редактор, без секретів у shell history. Файл парситься як дані, не виконується.
+Пароль записується тимчасово в `.env`, після seed видаляється в finally, і лише
+потім виконується `config:cache`; наявність bootstrap-пароля в кеші завершує setup
+помилкою й видаленням небезпечного кешу. Input JSON залишається під вашим контролем.
+
+Єдиний типовий шлях Google-ключа для Docker та Ubuntu:
+`/var/www/bulls/src/storage/app/private/google-service-account.json` (відносно Laravel:
+`storage/app/private/google-service-account.json`). Після локального копіювання JSON:
+
+```bash
+sudo chown bulls:www-data /var/www/bulls/src/storage/app/private/google-service-account.json
+sudo chmod 0640 /var/www/bulls/src/storage/app/private/google-service-account.json
+```
+
+Секрети не слід включати до архіву вихідного коду чи передавати в чат. Надайте
+Service Account доступ Viewer до тестової Google-таблиці. Без ключа звичайний вхід
+і CRUD працюють, а Google-перевірки та імпорт потребують налаштованих credentials.
+
+### Окрема сумісність MySQL 8.0
+
+[Compose-файл для MySQL 8.0](docker-compose.mysql80-test.yml) створює окремий проєкт,
+мережу й том, без опублікованих портів. Це тест БД, **не заміна Ubuntu VM**:
+
+```bash
+docker compose -f docker-compose.mysql80-test.yml up -d --build
+docker compose -f docker-compose.mysql80-test.yml exec --user 1000:1000 php \
+  vendor/bin/phpunit --configuration=phpunit.mysql.xml
+```
+
+Видалення лише одноразового стенду та його **тестових** даних:
+
+```bash
+docker compose -f docker-compose.mysql80-test.yml down -v
 ```
