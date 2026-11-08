@@ -58,7 +58,26 @@ class SheetImporter
         return $this->perform($target, $this->snapshotDate($snapshotDate, $trigger), $trigger, $cache);
     }
 
-    private function snapshotDate(?string $date, SyncRunTriggerType $trigger): string
+    /** @param list<int> $ids
+     * @return Collection<int, SyncRun>
+     */
+    public function importPending(array $ids): Collection
+    {
+        $cache = [];
+        $results = collect();
+        $lastTab = null;
+        foreach (SyncRun::whereIn('id', $ids)->where('status', 'pending')->with('target')->orderBy('target_id')->get()->sortBy(fn ($run) => $run->target->tab_id) as $run) {
+            if ($lastTab !== $run->target->tab_id) {
+                $cache = [];
+                $lastTab = $run->target->tab_id;
+            }
+            $results->push($this->perform($run->target, $run->snapshot_date->format('Y-m-d'), $run->trigger_type, $cache, $run));
+        }
+
+        return $results;
+    }
+
+    public function snapshotDate(?string $date, SyncRunTriggerType $trigger): string
     {
         $today = now('Europe/Kyiv')->format('Y-m-d');
         $date ??= $today;
@@ -72,7 +91,7 @@ class SheetImporter
     }
 
     /** @param array<string, array|GoogleSheetsApiException> $cache */
-    private function perform(SyncTarget $target, string $date, SyncRunTriggerType $trigger, array &$cache): SyncRun
+    private function perform(SyncTarget $target, string $date, SyncRunTriggerType $trigger, array &$cache, ?SyncRun $attempt = null): SyncRun
     {
         return $this->coordinator->execute($target, $date, $trigger, function (Connection $connection, callable $heartbeat, SyncRun $run) use ($target, $date, &$cache): int {
             $signature = $this->configurationSignature($connection, $target->id);
@@ -175,7 +194,7 @@ class SheetImporter
             });
 
             return count($records);
-        });
+        }, $attempt);
     }
 
     private function assertConfiguration(Connection $connection, int $targetId, string $signature, bool $lock = false): void

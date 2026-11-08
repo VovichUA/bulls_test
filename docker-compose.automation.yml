@@ -1,0 +1,42 @@
+services:
+  worker:
+    build:
+      context: ./.docker/php
+      dockerfile: Dockerfile
+    init: true
+    user: "${APP_UID:-1000}:${APP_GID:-1000}"
+    working_dir: /var/www/html
+    command: ["/bin/sh", "/opt/bulls/queue-worker.sh", "/var/www/html"]
+    restart: unless-stopped
+    stop_grace_period: 660s
+    volumes:
+      - ./src:/var/www/html
+      - ./deploy/queue-worker.sh:/opt/bulls/queue-worker.sh:ro
+    environment:
+      DB_QUEUE_RETRY_AFTER: "720"
+      XDEBUG_MODE: "off"
+    depends_on:
+      mysql:
+        condition: service_healthy
+    networks:
+      - bulls_network
+
+  scheduler:
+    build:
+      context: ./.docker/php
+      dockerfile: Dockerfile
+    init: true
+    user: "${APP_UID:-1000}:${APP_GID:-1000}"
+    working_dir: /var/www/html
+    command: ["php", "artisan", "schedule:work", "--no-interaction"]
+    restart: unless-stopped
+    volumes:
+      - ./src:/var/www/html
+    environment:
+      DB_QUEUE_RETRY_AFTER: "720"
+      XDEBUG_MODE: "off"
+    depends_on:
+      mysql:
+        condition: service_healthy
+    networks:
+      - bulls_network

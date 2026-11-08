@@ -50,7 +50,7 @@ class SchemaManager
             throw new SchemaLockTimeoutException('Timed out waiting for the target table schema lock. Retry later.');
         }
         if ((int) $acquired !== 1) {
-            throw new SchemaManagerException('Could not acquire the target table schema lock.');
+            throw new SchemaManagerException('Could not acquire the target table schema lock.', retryable: true);
         }
         try {
             $schema = $connection->getSchemaBuilder();
@@ -92,7 +92,7 @@ class SchemaManager
             throw $exception;
         } finally {
             if ((int) $connection->selectOne('SELECT RELEASE_LOCK(?) AS released', [$lock], false)->released !== 1) {
-                throw new SchemaManagerException('The schema lock session was lost. Retry the complete schema operation.');
+                throw new SchemaManagerException('The schema lock session was lost. Retry the complete schema operation.', retryable: true);
             }
         }
     }
@@ -104,7 +104,7 @@ class SchemaManager
         $pinned = new MySqlConnection($pdo, $connection->getDatabaseName(), '', $connection->getConfig());
         $pinned->setReadPdo($pdo);
         $pinned->setReconnector(static function (): never {
-            throw new SchemaManagerException('The schema lock session was lost. Retry the complete schema operation.');
+            throw new SchemaManagerException('The schema lock session was lost. Retry the complete schema operation.', retryable: true);
         });
         if ($dispatcher = $connection->getEventDispatcher()) {
             $pinned->setEventDispatcher($dispatcher);

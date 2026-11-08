@@ -11,7 +11,7 @@ use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 
-#[Fillable(['target_id', 'snapshot_date', 'trigger_type', 'status', 'rows_processed', 'rows_skipped', 'rows_failed', 'error', 'started_at', 'heartbeat_at', 'finished_at'])]
+#[Fillable(['failure_kind', 'config_fingerprint', 'dispatch_id', 'target_id', 'snapshot_date', 'trigger_type', 'status', 'rows_processed', 'rows_skipped', 'rows_failed', 'error', 'started_at', 'heartbeat_at', 'finished_at'])]
 class SyncRun extends Model
 {
     /** @use HasFactory<SyncRunFactory> */

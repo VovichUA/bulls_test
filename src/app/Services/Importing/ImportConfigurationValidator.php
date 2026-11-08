@@ -3,6 +3,7 @@
 namespace App\Services\Importing;
 
 use App\Enums\ColumnDataType;
+use App\Exceptions\ImportConfigurationException;
 use App\Exceptions\SheetImportException;
 use App\Models\SyncTarget;
 use App\Services\GoogleSheets\HeaderNormalizer;
@@ -23,15 +24,19 @@ class ImportConfigurationValidator
             $type = ColumnDataType::tryFrom($mapping->getRawOriginal('data_type'));
             $options = $mapping->type_options ?? [];
             if ($source === '' || $type === null || ! is_array($options)) {
-                throw new SheetImportException('Invalid source column, data type or type_options.');
+                throw new ImportConfigurationException('Invalid source column, data type or type_options.');
             }
-            $this->caster->validateOptions($type, $options, $mapping->format);
+            try {
+                $this->caster->validateOptions($type, $options, $mapping->format);
+            } catch (SheetImportException $exception) {
+                throw new ImportConfigurationException($exception->getMessage());
+            }
             if (in_array($source, $data['ambiguous'], true)) {
-                throw new SheetImportException('Ambiguous mapped source column: '.$source.'.');
+                throw new ImportConfigurationException('Ambiguous mapped source column: '.$source.'.');
             }
             $missing = ! in_array($source, $data['headers'], true);
             if ($missing && ! $mapping->nullable) {
-                throw new SheetImportException('Required source column is missing: '.$source.'.');
+                throw new ImportConfigurationException('Required source column is missing: '.$source.'.');
             }
             if ($missing) {
                 Log::warning('Optional source column is missing; importing NULL.', ['target_id' => $target->id, 'source_column' => $source]);
@@ -39,16 +44,16 @@ class ImportConfigurationValidator
             $mappings[] = ['source' => $source, 'column' => $mapping->target_column, 'type' => $type, 'options' => $options, 'format' => $mapping->format, 'nullable' => $mapping->nullable, 'missing' => $missing];
         }
         if ($mappings === []) {
-            throw new SheetImportException('At least one mapping is required.');
+            throw new ImportConfigurationException('At least one mapping is required.');
         }
         $keys = $target->unique_keys ?? [];
         if (! is_array($keys) || ! array_is_list($keys)) {
-            throw new SheetImportException('unique_keys must be a list of mapped destination names.');
+            throw new ImportConfigurationException('unique_keys must be a list of mapped destination names.');
         }
         $seen = [];
         foreach ($keys as $key) {
             if (! is_string($key) || ! in_array($key, array_column($mappings, 'column'), true) || in_array($key, $seen, true)) {
-                throw new SheetImportException('unique_keys must contain distinct mapped destination names.');
+                throw new ImportConfigurationException('unique_keys must contain distinct mapped destination names.');
             }
             $seen[] = $key;
         }

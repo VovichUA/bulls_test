@@ -18,7 +18,7 @@ use Throwable;
 class SnapshotCoordinator
 {
     /** @param callable(Connection, callable, SyncRun): int $import */
-    public function execute(SyncTarget $target, string $date, SyncRunTriggerType $trigger, callable $import): SyncRun
+    public function execute(SyncTarget $target, string $date, SyncRunTriggerType $trigger, callable $import, ?SyncRun $attempt = null): SyncRun
     {
         $main = $target->getConnection();
         if ($main->getDriverName() !== 'mysql' || $main->getTablePrefix() !== '' || $main->transactionLevel() !== 0 || $main->getPdo()->inTransaction()) {
@@ -29,7 +29,7 @@ class SnapshotCoordinator
         if (! is_int($timeout) || $timeout < 0 || $timeout > 60 || ! is_int($staleMinutes) || $staleMinutes < 1 || $staleMinutes > 1440) {
             throw new SheetImportException('Invalid importer lock or stale timeout configuration.');
         }
-        $run = SyncRun::on($target->getConnectionName())->create(['target_id' => $target->id, 'snapshot_date' => $date, 'trigger_type' => $trigger, 'status' => SyncRunStatus::Pending]);
+        $run = $attempt ?? SyncRun::on($target->getConnectionName())->create(['target_id' => $target->id, 'snapshot_date' => $date, 'trigger_type' => $trigger, 'status' => SyncRunStatus::Pending, 'config_fingerprint' => app(ConfigurationFingerprint::class)->read($main, $target->id)]);
         $pdo = $main->getPdo();
         $connection = new MySqlConnection($pdo, $main->getDatabaseName(), '', $main->getConfig());
         $connection->setReadPdo($pdo);
@@ -44,25 +44,41 @@ class SnapshotCoordinator
         try {
             $result = $connection->selectOne('SELECT GET_LOCK(?, ?) AS acquired', [$lock, $timeout], false)->acquired;
             if ($result !== null && (int) $result === 0) {
-                return $this->finish($run, SyncRunStatus::Skipped, 'Another worker holds the snapshot lock.');
+                return $attempt !== null ? $run->fresh() : $this->finish($run, SyncRunStatus::Skipped, 'Another worker holds the snapshot lock.');
             }
             if ((int) $result !== 1) {
                 throw new SheetImportException('Unable to acquire the snapshot lock.');
             }
             $acquired = true;
+            $run = $run->fresh();
+            if ($run->status !== SyncRunStatus::Pending) {
+                return $run;
+            }
+            if ($attempt !== null && $trigger === SyncRunTriggerType::Scheduled && $date !== today('Europe/Kyiv')->toDateString()) {
+                return $this->finish($run, SyncRunStatus::Skipped, 'Scheduled delivery expired at Kyiv midnight.');
+            }
+            if ($attempt !== null && ($run->heartbeat_at ?? $run->started_at ?? $run->created_at)->lt(now()->subMinutes($staleMinutes))) {
+                return $this->finish($run, SyncRunStatus::Failed, 'Import attempt expired due to inactivity.', 0, 'expired');
+            }
             $scope = fn () => $connection->table('sync_runs')->where('target_id', $target->id)->where('snapshot_date', $date);
             $scope()->where('id', '!=', $run->id)->whereIn('status', ['pending', 'running'])
                 ->whereRaw('COALESCE(heartbeat_at, started_at, created_at) < ?', [now()->subMinutes($staleMinutes)->format('Y-m-d H:i:s')])
-                ->update(['status' => 'failed', 'error' => 'Import attempt expired due to inactivity.', 'finished_at' => now(), 'updated_at' => now()]);
+                ->update(['status' => 'failed', 'failure_kind' => 'expired', 'error' => 'Import attempt expired due to inactivity.', 'finished_at' => now(), 'updated_at' => now()]);
             $fresh = $target->fresh(['tab.source']);
             if (! $fresh || ! $fresh->is_active || ! $fresh->tab->is_active || ! $fresh->tab->source->is_active) {
                 return $this->finish($run, SyncRunStatus::Skipped, 'Source, tab or target is inactive.');
+            }
+            if ($attempt !== null && $run->config_fingerprint !== app(ConfigurationFingerprint::class)->read($connection, $target->id)) {
+                throw new SheetImportException('Configuration changed after dispatch. Retry with current settings.');
             }
             if ($scope()->where('id', '!=', $run->id)->where('status', 'running')->exists()) {
                 return $this->finish($run, SyncRunStatus::Skipped, 'An unexpired import attempt is already running.');
             }
             if ($trigger === SyncRunTriggerType::Scheduled && $scope()->where('status', 'succeeded')->exists()) {
                 return $this->finish($run, SyncRunStatus::Skipped, 'The scheduled snapshot already succeeded.');
+            }
+            if ($attempt !== null && $trigger === SyncRunTriggerType::Scheduled && ! app(SchedulingPolicy::class)->eligible($connection, $target, $date, $run->id)) {
+                return $this->finish($run, SyncRunStatus::Skipped, 'Scheduled attempt is no longer eligible.');
             }
             $connection->table('sync_runs')->where('id', $run->id)->where('status', 'pending')->update(['status' => 'running', 'started_at' => now(), 'heartbeat_at' => now(), 'updated_at' => now()]);
             $heartbeat = function () use ($connection, $run): void {
@@ -82,7 +98,7 @@ class SnapshotCoordinator
             $message = $safe ? $exception->getMessage() : 'Import failed due to an internal or database error.';
             Log::error('Sheet import failed.', ['target_id' => $target->id, 'run_id' => $run->id, 'error' => $message]);
 
-            return $this->finish($run, SyncRunStatus::Failed, $message, $exception instanceof RowValidationException ? $exception->failedRows : ($exception instanceof SheetImportException && $exception->sourceRow !== null ? 1 : 0));
+            return $this->finish($run, SyncRunStatus::Failed, $message, $exception instanceof RowValidationException ? $exception->failedRows : ($exception instanceof SheetImportException && $exception->sourceRow !== null ? 1 : 0), app(FailureClassifier::class)->classify($exception));
         } finally {
             if ($acquired) {
                 try {
@@ -107,9 +123,9 @@ class SnapshotCoordinator
         }
     }
 
-    private function finish(SyncRun $run, SyncRunStatus $status, string $message, int $rowsFailed = 0): SyncRun
+    private function finish(SyncRun $run, SyncRunStatus $status, string $message, ?int $rowsFailed = 0, ?string $failureKind = null): SyncRun
     {
-        $run->newQuery()->whereKey($run->id)->whereIn('status', ['pending', 'running'])->update(['status' => $status->value, 'error' => $message, 'rows_failed' => $rowsFailed, 'finished_at' => now(), 'updated_at' => now()]);
+        $run->newQuery()->whereKey($run->id)->whereIn('status', ['pending', 'running'])->update(['status' => $status->value, 'error' => $message, 'rows_failed' => $rowsFailed, 'failure_kind' => $failureKind, 'finished_at' => now(), 'updated_at' => now()]);
 
         return $run->fresh();
     }

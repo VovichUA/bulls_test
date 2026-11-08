@@ -2,7 +2,7 @@
 
 Початкове середовище: Laravel 13, PHP 8.4 FPM, Nginx, MySQL 8.4.
 Реалізовано схему конфігурації, Google Sheets client, SchemaManager і ядро
-щоденних знімків. Команда запуску, автоматичний розклад, черга та UI ще не додані.
+щоденних знімків. Команда запуску, щоденний розклад і database-черга реалізовані; UI ще не доданий.
 
 ## SheetImporter: ядро імпорту
 
@@ -542,3 +542,137 @@ PhpStorm server: `bulls`, port: `9003`, mapping: `src` → `/var/www/html`.
 
 Стандартна стартова сторінка Laravel працює без збірки frontend.
 Для подальшої роботи з Vite потрібні Node.js та встановлення залежностей із `src/package.json`.
+
+## Автоматизація
+
+Використовується MySQL-черга `database`, одна `SyncTabJob` на вкладку й один
+воркер. Команда **ставить задачі в чергу**, а не чекає завершення імпорту.
+`--source` і `--tab` — числові ID записів конфігурації, не Google ID/назва вкладки.
+
+Спочатку застосуйте нову міграцію метаданих `sync_runs`:
+
+```bash
+docker compose exec --user 1000:1000 php php artisan migrate --no-interaction
+docker compose exec --user 1000:1000 php php artisan config:clear
+```
+
+Ручні запуски:
+
+```bash
+docker compose exec --user 1000:1000 php php artisan sheets:sync
+docker compose exec --user 1000:1000 php php artisan sheets:sync --source=1 --tab=2
+docker compose exec --user 1000:1000 php php artisan sheets:sync --source=1 --date=2026-11-06
+```
+
+`--date` приймає поточну або минулу дату; читається поточний стан Google Sheets.
+Ручна команда обходить scheduled-бюджет і постійне блокування, але поважає
+активність конфігурації, pending/running та snapshot lock. Наявна pending/running
+робота не дублюється. Ручний успіх із поточним fingerprint знімає попереднє
+постійне блокування, не видаляючи історію та не обнуляючи денний лічильник.
+
+Узгоджений розклад — **лише раз на добу о 02:00 Europe/Kyiv**, без півгодинних
+повторів. `sheets:sync --scheduled` відбирає активні targets без succeeded за
+сьогодні (manual-успіх теж рахується), pending/running роботи, вичерпаного бюджету
+чи постійного блокування. Умови повторно перевіряються під lock при доставці.
+Після півночі scheduled-задача за попередню дату пропускається без читання Sheets;
+історичні прогалини автоматично не заповнюються.
+
+Одна job ділить кеш читання між targets вкладки. `tries=3`, backoff 60/180 с:
+queue-повтори призначені для schema-lock timeout та зайнятого snapshot lock.
+Успішні siblings повторно не імпортуються. Для scheduled діє межа **3 failed-спроби
+на target/date**, включно з queue retries, незалежно від зміни конфігурації.
+Інші тимчасові помилки повторюються лише наступним плановим або явним запуском.
+
+**Обмеження щоденного запуску:** якщо Google недоступний о 02:00 і внутрішні
+HTTP-повтори вичерпані, автоматичної спроби пізніше того самого дня не буде.
+Знімок за цей день може бути відсутній до ручного відновлення; наступний
+щоденний запуск обробляє вже нову дату. Наприклад, для пропущеного 7 листопада:
+
+```bash
+# Docker: поставити відновлення в чергу; worker має працювати
+docker compose exec --user 1000:1000 php php artisan sheets:sync --source=1 --date=2026-11-07
+
+# Ubuntu: виконати з каталогу Laravel; Supervisor worker має працювати
+php artisan sheets:sync --source=1 --date=2026-11-07
+```
+
+Замініть ID джерела й дату на потрібні; за необхідності додайте `--tab=2`.
+Відновлення читає **поточний** стан Sheets і записує його під указаною датою,
+а не відтворює історичний стан таблиці на ту дату. Додаткового запуску о 06:00
+в погодженому розкладі немає.
+
+Постійні помилки mapping/schema та non-retryable API 400/401/403/404 блокують
+scheduled-запуски для того самого fingerprint і після опівночі. Quota 403,
+помилки рядків, timeout та невідомі збої не створюють постійного блокування.
+Виправлення доступу в Google не змінює fingerprint: після нього виконайте ручний
+імпорт. Класифікація, fingerprint і dispatch UUID зберігаються в `sync_runs`;
+значення клітинок і ключі доступу туди не потрапляють.
+
+Резервування pending передує enqueue. Помилка enqueue закриває зарезервовані
+спроби як failed; аварія між цими діями може залишити pending до відновлення.
+Outbox немає: commit резервування та enqueue не є однією атомарною операцією.
+Після таймауту такий pending закривається як failed під час наступного
+dispatch/доставки; scheduled-невдача витрачає денний бюджет відповідного
+target/date, навіть якщо запит до Google ще не виконувався.
+Pending старше 15 хвилин закриваються під вільним snapshot lock. Покинутий
+`running`, що вже не має власника lock, завершується без повторного запису даних
+при наступному dispatch/доставці, включно з попередніми датами. Завершені та прострочені run IDs не виконуються
+знову. Live lock-holder потребує завершення процесу/сесії; application не
+виконує database KILL. Retention журналу залишається окремою задачею.
+
+### Docker automation
+
+Звичайний `docker compose up` запускає середовище розробки без автоматизації.
+Для автоматизації оберіть один спосіб: Docker worker + scheduler із цього
+розділу або Ubuntu Supervisor + cron із наступного. Не запускайте обидві
+пари одночасно для тієї самої бази й черги.
+
+Docker-автоматизація вмикається явно:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.automation.yml up -d worker scheduler
+docker compose -f docker-compose.yml -f docker-compose.automation.yml logs worker scheduler
+```
+
+### Ubuntu: cron та Supervisor
+
+```cron
+* * * * * cd /var/www/bulls/src && /usr/bin/php artisan schedule:run >> /var/www/bulls/src/storage/logs/scheduler.log 2>&1
+```
+
+Перевірте шляхи й користувача в [Supervisor-конфігу](deploy/supervisor-sheets.conf),
+скопіюйте його до `/etc/supervisor/conf.d/bulls-sheets.conf` та застосуйте:
+
+```bash
+sudo supervisorctl reread
+sudo supervisorctl update
+sudo supervisorctl status bulls-sheets-worker
+```
+
+Конфіг використовує [обгортку воркера](deploy/queue-worker.sh), `numprocs=1`,
+`stopasgroup=true`, `killasgroup=true`, `stopwaitsecs=660`. Майбутній `setup.sh`
+має встановлювати ту саму межу. Не запускайте Docker worker і Supervisor worker
+одночасно для цієї черги. Один воркер не гарантує дотримання квоти сам по собі:
+HTTP retry/backoff залишається потрібним. Redis у цьому варіанті не налаштований.
+
+### Таймаути й перевірки
+
+Job timeout — 600 с. Зовнішня обгортка запускає один `queue:work --once` під
+GNU `timeout`: TERM через 615 с, KILL ще через 15 с, жорстка межа 630 с.
+Database `retry_after=720` перевищує цю межу й стосується **однієї спроби**.
+Під час backoff job звільняє резервування й чекає майбутнього `available_at`;
+воркер не спить всередині зарезервованої job. Вкладка повинна вміщатися в ліміт
+job; timeout не перетворює частково виконаний target на успішний знімок.
+При зміні env переконайтеся, що config cache не містить старого retry_after.
+
+Автоматичні тести перевіряють metadata/policy, кеш, доставки, прострочення,
+справжню database-чергу та нерівності таймаутів без тривалих очікувань.
+TERM/KILL заблокованого disposable worker — окрема ручна перевірка поза CI
+у [чеклісті](docs/superpowers/plans/2026-11-07-scheduling-followups.md), лише на
+тестовій базі.
+
+Перегляд розкладу без імпорту:
+
+```bash
+docker compose exec --user 1000:1000 php php artisan schedule:list
+```
