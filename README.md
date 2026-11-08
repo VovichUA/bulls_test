@@ -5,6 +5,47 @@
 щоденних знімків, щоденний розклад і database-чергу. Адмінпанель Breeze / Blade / Alpine
 підтримує реєстрацію зі схваленням адміністратором, конфігурацію імпорту та журнал запусків.
 
+## Навігація
+
+- [Архітектура](#архітектура) та [схема БД](#схема-конфігурації).
+- [Google API і Service Account](#google-sheets-service-account).
+- [Docker для розробки](#docker-перший-запуск-після-клонування).
+- [Ubuntu setup.sh](#ubuntu-setupsh-окрема-vm-на-вашому-ноутбуці) або
+  [ручне встановлення без Docker](docs/manual-installation.md).
+- [Демо-seeder і mappings](#демонстраційна-конфігурація),
+  [готові CSV-файли](examples/sheets/README.md), [скриншоти UI](#скриншоти-адмінпанелі).
+- [Автоматизація](#автоматизація), [тести та живі перевірки](docs/testing.md).
+
+## Архітектура
+
+```mermaid
+flowchart TD
+    UI[Blade / Alpine UI] --> CONFIG[(Конфігурація MySQL)]
+    CRON[Cron: schedule:run щохвилини] --> SCHEDULE[Laravel: 02:00 Europe/Kyiv]
+    SCHEDULE --> COMMAND[sheets:sync --scheduled]
+    UI --> DISPATCH[SyncDispatcher]
+    COMMAND --> DISPATCH
+    DISPATCH --> QUEUE[(Database queue: sheets)]
+    QUEUE --> JOB[SyncTabJob: одна job на вкладку]
+    JOB --> IMPORT[SheetImporter]
+    CONFIG --> IMPORT
+    IMPORT --> GOOGLE[GoogleSheetsClient: Service Account readonly]
+    GOOGLE --> API[Google Sheets API]
+    IMPORT --> VALIDATE[Mapping validator + ValueCaster]
+    VALIDATE --> SCHEMA[SchemaManager: CREATE / ADD COLUMN]
+    SCHEMA --> SNAPSHOT[SnapshotCoordinator: lock + transaction]
+    SNAPSHOT --> DATA[(Цільові таблиці MySQL)]
+    SNAPSHOT --> RUNS[(sync_runs)]
+```
+
+Конфігурація зберігається в БД та редагується через UI; один Service Account
+читає всі дозволені йому файли. Одна job обробляє вкладку, читання спільне для
+її targets. Валідація та приведення значень передують DDL; DDL виконується до
+транзакції даних. MySQL GET_LOCK захищає конкретний target/date, а заміна рядків
+і успішний запис журналу виконуються атомарно. Помилка target зберігає його
+попередній знімок і не зупиняє інші targets. Минулі дні залишаються окремими
+знімками; ручний імпорт минулого дня читає поточний стан Google, а не історію Google.
+
 ## SheetImporter: ядро імпорту
 
 Виклик із Laravel-коду (сервіс не запускається автоматично):
@@ -191,7 +232,7 @@ DDL виконується **до транзакції заміни знімка
 Ім’я lock — `sheets_schema:` + SHA-1 від імені БД, NUL-роздільника та таблиці:
 це завжди 54 ASCII-символи, незалежно від довжини початкових імен.
 Таймаут повертається як `SchemaLockTimeoutException` (нащадок
-`SchemaManagerException`), який майбутня черга може обробляти як retryable.
+`SchemaManagerException`); черга класифікує його як retryable `schema_lock_timeout`.
 Метадані та mappings читаються з writer. DDL закріплено за PDO, яке отримало
 блокування: втрата сесії завершує операцію помилкою без автоматичного reconnect
 і повторного DDL. Після відновлення з’єднання слід повторити весь `ensure()`.
@@ -226,6 +267,7 @@ DDL-тести та тести імпортера з викликом `ensure()`
    доступу Service Account автоматично.
 
 Офіційні інструкції: [створення credentials](https://developers.google.com/workspace/guides/create-credentials#service-account),
+[створення JSON-ключа](https://docs.cloud.google.com/iam/docs/keys-create-delete),
 [Service Account OAuth](https://developers.google.com/identity/protocols/oauth2/service-account).
 Якщо організація заборонила JSON-ключі або зовнішній sharing, потрібне
 погоджене адміністратором налаштування доступу.
@@ -281,8 +323,8 @@ foreach ($rows as $sourceRow => $values) {
 
 Заголовки нормалізуються: крайові Unicode-пробіли, NBSP, U+200B/U+FEFF
 прибираються; внутрішні пробіли стискаються; регістр знижується через UTF-8.
-`HeaderNormalizer` доступний окремо для майбутнього порівняння mappings.
-Він приймає лише `string`: імпортер повинен пропустити `null` у списку заголовків
+`HeaderNormalizer` використовується для порівняння mappings.
+Він приймає лише `string`: імпортер пропускає `null` у списку заголовків
 до виклику нормалайзера. Заголовки від `getData()` вже нормалізовані.
 `getHeaders()` повертає нормалізовані назви у вихідному порядку: порожні
 назви стають `null`, дублікати залишаються видимими. `getData()` одним запитом
@@ -391,6 +433,53 @@ erDiagram
     sheet_tabs ||--o{ sync_targets : writes_to
     sync_targets ||--o{ column_mappings : maps
     sync_targets ||--o{ sync_runs : logs
+    sheet_sources {
+        bigint id PK
+        string name
+        string spreadsheet_id UK
+        boolean is_active
+    }
+    sheet_tabs {
+        bigint id PK
+        bigint source_id FK
+        string tab_name
+        int header_row
+        boolean is_active
+    }
+    sync_targets {
+        bigint id PK
+        bigint tab_id FK
+        string target_table
+        json unique_keys
+        boolean is_active
+    }
+    column_mappings {
+        bigint id PK
+        bigint target_id FK
+        string source_column
+        string target_column
+        string data_type
+        json type_options
+        boolean nullable
+        string format
+    }
+    sync_runs {
+        bigint id PK
+        bigint target_id FK
+        date snapshot_date
+        string status
+        string trigger_type
+        bigint rows_processed
+        bigint rows_skipped
+        bigint rows_failed
+        string failure_kind
+        string config_fingerprint
+        string dispatch_id
+        text error
+        datetime started_at
+        datetime heartbeat_at
+        datetime finished_at
+    }
 ```
 
 | Таблиця | Призначення | Унікальність |
@@ -403,7 +492,7 @@ erDiagram
 
 Одна вкладка може мати кілька targets із незалежними mappings. Різні targets
 можуть посилатися на ту саму цільову таблицю. `unique_keys=null` або `[]`
-вимикає майбутню перевірку бізнес-дублікатів.
+вимикає перевірку бізнес-дублікатів.
 
 Типи колонок: `string`, `text`, `integer`, `decimal`, `boolean`, `date`,
 `datetime`. `type_options` зберігається як JSON, наприклад
@@ -411,13 +500,24 @@ erDiagram
 Статуси запуску: `pending`, `running`, `succeeded`, `failed`, `skipped`;
 `trigger_type`: `scheduled` або `manual`. Моделі повертають enum для цих полів,
 масиви для JSON, boolean для прапорців і незмінні об’єкти дат для журналу.
-Час застосунку та timestamps — UTC; локальна дата майбутнього знімка
-визначатиметься окремо за `Europe/Kyiv`.
+Час застосунку та timestamps — UTC; локальна дата знімка визначається за `Europe/Kyiv`.
+
+Динамічні таблиці (наприклад `sales`) містять службові поля `id`,
+`sync_target_id`, `snapshot_date`, `source_row`, `row_hash`, `created_at`,
+`updated_at` та колонки з mappings. Унікальний індекс:
+`(sync_target_id, snapshot_date, source_row)`. Зв’язок із target логічний;
+фізичний FK у динамічній таблиці не створюється. `row_hash` — SHA-256,
+не ключ для upsert. Поточний власник знімка — останній успішний run target/date.
+Усі конфігураційні моделі також мають timestamps; у діаграмі їх опущено.
+
+Окремо `users` зберігає адміністратора та схвалення зареєстрованих користувачів,
+а стандартні `jobs`, `job_batches`, `failed_jobs`, `cache`, `cache_locks`,
+`sessions` забезпечують інфраструктуру Laravel.
 
 Конфігурація без запусків видаляється каскадно одним DELETE source.
 Наявність хоча б одного запису журналу блокує видалення всього source;
-для відключення використовуйте `is_active=false`. Валідація вхідних даних,
-нормалізація заголовків і відновлення завислих запусків належать етапу імпортера.
+для відключення використовуйте `is_active=false`. Валідацію mappings,
+нормалізацію заголовків і відновлення застарілих запусків виконує імпортер.
 
 ## Демонстраційна конфігурація
 
@@ -437,14 +537,45 @@ Seeder створює неактивне джерело `Sales demo` з placehol
 | `price` | `product_price` | decimal(12,2) |
 | `amount` | `amount` | integer |
 
-У прикладі `unique_keys=null`; усі чотири mappings обов’язкові для майбутнього
+У прикладі `unique_keys=null`; усі чотири mappings обов’язкові для
 імпорту. Seeder можна виконувати повторно: наявні записи не дублюються й
 не перезаписуються. Він не викликає Google API та не створює таблицю `sales`.
 `DatabaseSeeder` не запускає цей приклад автоматично.
 
+Для Ubuntu після встановлення:
+
+```bash
+sudo -u bulls /usr/bin/php8.4 /var/www/bulls/src/artisan db:seed --class=SheetConfigurationSeeder --force
+```
+
+Готові синтетичні файли: [sales.csv](examples/sheets/sales.csv) і
+[sales-reordered.csv](examples/sheets/sales-reordered.csv). Другий містить ті самі
+продажі з іншим порядком колонок та додатковою notes.
+[Інструкція імпорту CSV в Google і підключення демо](examples/sheets/README.md).
+Замініть placeholder на ID власного файлу, надайте Viewer Service Account
+і лише потім активуйте джерело. Відразу після seed Google API не викликається.
+
+## Скриншоти адмінпанелі
+
+Справжня Ubuntu 24.04 VM із демо-seeder; персональні дані не включено.
+Джерело неактивне, тому демонстрація не запускає імпорт placeholder-файлу.
+
+Список джерел:
+
+![Список файлів Google Sheets](docs/screenshots/admin-sources.jpg)
+
+Цільова таблиця та стан автоматизації:
+
+![Ціль і стан автоматизації](docs/screenshots/admin-target.jpg)
+
+Відповідність заголовків колонкам БД:
+
+![Мапінг date, product_name і price](docs/screenshots/admin-mappings.jpg)
+
 ## Вимоги
 
-Linux із Docker Engine та Docker Compose v2. Локальні PHP і Composer не потрібні.
+Для Docker-варіанта: Linux із Docker Engine та Docker Compose v2.
+Локальні PHP і Composer не потрібні.
 Команди виконуйте з кореня проєкту.
 
 ## Docker: перший запуск після клонування
@@ -615,8 +746,8 @@ docker compose exec --user 1000:1000 php php artisan db:seed --class=AdminSeeder
 Доступ Viewer до Google-таблиці надається email Service Account, як описано
 в інструкції Google API. У розробці тести використовують підміну API, без реальних запитів.
 
-У цьому етапі міграції робочої БД, створення адміністратора та запуск воркерів
-автоматично не виконуються: наведені команди є кроками активації.
+Для Docker міграції, створення адміністратора та запуск воркерів виконуються
+наведеними командами. Ubuntu `setup.sh` виконує ці кроки автоматично.
 
 ## Стан автоматизації та обмеження UI
 
@@ -817,6 +948,16 @@ docker compose exec --user 1000:1000 php php artisan schedule:list
 
 ## Ubuntu setup.sh: окрема VM на вашому ноутбуці
 
+Швидкий варіант на чистій Ubuntu 22.04/24.04 із checkout у `/var/www/bulls`:
+
+```bash
+cd /var/www/bulls
+sudo ./setup.sh --server-name YOUR_VM_IP
+```
+
+Скрипт запитає дані адміністратора; готового пароля немає. Для встановлення
+без скрипта дивіться [повну ручну інструкцію](docs/manual-installation.md).
+
 Мінімальний [setup.sh](setup.sh) підтримує **Ubuntu 22.04 і 24.04 LTS** зі
 запущеним systemd, на чистій виділеній VM. Не запускайте його на основній ОС
 ноутбука: він встановлює системні служби й керує `/var/www/bulls`, БД `bulls`,
@@ -860,7 +1001,7 @@ tar --exclude='src/.env*' \
   --exclude='src/bootstrap/cache' --exclude='src/public/storage' \
   --exclude='src/public/build' --exclude='src/public/hot' \
   --exclude='src/.git' --exclude='src/.codex' --exclude='src/.idea' \
-  -cf /tmp/bulls-ubuntu-source.tar setup.sh deploy src
+  -cf /tmp/bulls-ubuntu-source.tar setup.sh deploy src examples
 tar -rf /tmp/bulls-ubuntu-source.tar src/.env.example
 gzip -f /tmp/bulls-ubuntu-source.tar
 multipass transfer /tmp/bulls-ubuntu-source.tar.gz bulls-setup:/home/ubuntu/
