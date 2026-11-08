@@ -10,9 +10,11 @@ use App\Models\ColumnMapping;
 use App\Models\SyncRun;
 use App\Models\SyncTarget;
 use App\Services\GoogleSheets\GoogleSheetsClient;
+use App\Services\GoogleSheets\SheetRowMapper;
 use App\Services\SheetImporter;
 use Illuminate\Database\Events\QueryExecuted;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Schema;
 use Mockery;
@@ -24,7 +26,83 @@ class SheetImporterTest extends DdlDatabaseTestCase
     protected function setUp(): void
     {
         parent::setUp();
+        Http::preventStrayRequests();
         $this->travelTo(now()->setDate(2026, 11, 7)->setTime(12, 0));
+    }
+
+    #[DataProvider('columnLayouts')]
+    public function test_imports_reordered_physical_columns_and_ignores_unmapped_extras(array $values): void
+    {
+        $target = $this->target();
+        $target->tab->update(['header_row' => 3]);
+        $this->mapping($target, 'Product Name', 'name');
+        $this->mapping($target, 'Price', 'product_price', 'decimal');
+        $this->mapping($target, 'Amount', 'amount', 'integer');
+        $mapper = app(SheetRowMapper::class);
+        $headers = $mapper->headers($values[2]);
+        $this->data($headers, $mapper->rows($values, 3), $mapper->ambiguous($headers));
+
+        $run = $this->importer()->importTarget($target);
+
+        $this->assertSame(SyncRunStatus::Succeeded, $run->status);
+        $this->assertSame(2, $run->rows_processed);
+        $this->assertDatabaseHas('import_sales', ['source_row' => 4, 'name' => 'Tea', 'product_price' => '12.5000', 'amount' => 2]);
+        $this->assertDatabaseHas('import_sales', ['source_row' => 6, 'name' => 'Coffee', 'product_price' => '20.0000', 'amount' => 3]);
+        $this->assertSame(2, DB::table('import_sales')->count());
+        foreach (['notes', 'total', 'price', 'product_name'] as $unmapped) {
+            $this->assertFalse(Schema::hasColumn('import_sales', $unmapped));
+        }
+        Http::assertNothingSent();
+    }
+
+    public static function columnLayouts(): array
+    {
+        return [
+            'original order' => [[[], [], ['Product Name', 'Price', 'Amount'], ['Tea', 12.5, 2], [], ['Coffee', 20, 3]]],
+            'reordered with extra and ambiguous unselected columns' => [[[], [], ['Notes', 'Amount', ' PRICE ', 'Product  Name', '', 'Total', ' total '], ['Ignore', 2, 12.5, 'Tea', 'Unnamed', 1, 2], [], ['', 3, 20, 'Coffee']]],
+        ];
+    }
+
+    public function test_new_mapping_adds_physical_column_and_preserves_previous_day(): void
+    {
+        $target = $this->target();
+        $this->mapping($target, 'name', 'name');
+        $this->data(['name'], [2 => ['name' => 'Tea']]);
+        $this->assertSame(SyncRunStatus::Succeeded, $this->importer()->importTarget($target, '2026-11-06')->status);
+        $this->assertFalse(Schema::hasColumn('import_sales', 'product_price'));
+
+        $this->mapping($target, 'price', 'product_price', 'decimal', true);
+        $this->data(['price', 'name'], [2 => ['price' => 12.5, 'name' => 'Tea']]);
+        $run = $this->importer()->importTarget($target);
+
+        $this->assertSame(SyncRunStatus::Succeeded, $run->status);
+        $this->assertTrue(Schema::hasColumn('import_sales', 'product_price'));
+        $this->assertDatabaseHas('import_sales', ['snapshot_date' => '2026-11-06', 'name' => 'Tea', 'product_price' => null]);
+        $this->assertDatabaseHas('import_sales', ['snapshot_date' => '2026-11-07', 'name' => 'Tea', 'product_price' => '12.5000']);
+        $this->assertSame(2, DB::table('import_sales')->count());
+        Http::assertNothingSent();
+    }
+
+    public function test_one_tab_populates_two_structures_and_repeat_does_not_duplicate_snapshots(): void
+    {
+        $sales = $this->target();
+        $products = SyncTarget::factory()->for($sales->tab, 'tab')->create(['target_table' => 'import_products']);
+        $this->mapping($sales, 'name', 'product_name');
+        $this->mapping($sales, 'price', 'product_price', 'decimal');
+        $this->mapping($products, 'name', 'label');
+        $this->data(['price', 'name'], [2 => ['price' => 12.5, 'name' => 'Tea'], 3 => ['price' => 12.5, 'name' => 'Tea']], [], 2);
+
+        $this->assertSame([SyncRunStatus::Succeeded, SyncRunStatus::Succeeded], $this->importer()->importAll()->pluck('status')->all());
+        $this->assertSame([SyncRunStatus::Skipped, SyncRunStatus::Skipped], $this->importer()->importAll()->pluck('status')->all());
+        $this->assertSame(SyncRunStatus::Succeeded, $this->importer()->importTarget($sales)->status);
+
+        $this->assertSame(2, DB::table('import_sales')->count());
+        $this->assertSame(2, DB::table('import_products')->count());
+        $this->assertDatabaseHas('import_sales', ['product_name' => 'Tea', 'product_price' => '12.5000']);
+        $this->assertDatabaseHas('import_products', ['label' => 'Tea', 'sync_target_id' => $products->id]);
+        $this->assertFalse(Schema::hasColumn('import_products', 'product_price'));
+        $this->assertSame([2, 3], DB::table('import_sales')->orderBy('source_row')->pluck('source_row')->all());
+        Http::assertNothingSent();
     }
 
     public function test_imports_cast_values_with_source_positions_and_snapshot_metadata(): void
